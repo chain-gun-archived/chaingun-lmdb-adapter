@@ -1,6 +1,6 @@
 {
   "name": "@notabug/chaingun-lmdb",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "LMDB Graph Connector for ChainGun",
   "keywords": ["gundb", "chaingun"],
   "main": "dist/@notabug/chaingun-lmdb.umd.js",

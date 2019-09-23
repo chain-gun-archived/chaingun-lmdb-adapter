@@ -7,8 +7,10 @@ export const DEFAULT_CONFIG: LmdbOptions = {
 export class GunLmdbClient {
   env: any
   dbi: any
+  lmdb: any
 
   constructor(lmdbConfig = DEFAULT_CONFIG) {
+    this.lmdb = lmdb
     this.env = new lmdb.Env()
     this.env.open(lmdbConfig)
     this.dbi = this.env.openDbi({
@@ -17,9 +19,9 @@ export class GunLmdbClient {
     })
   }
 
-  async get(soul: string) {
+  get(soul: string) {
     if (!soul) return null
-    const txn = this.env.beginTxn()
+    const txn = this.env.beginTxn({ readOnly: true })
     try {
       const data = this.deserialize(txn.getStringUnsafe(this.dbi, soul))
       txn.commit()
@@ -30,9 +32,9 @@ export class GunLmdbClient {
     }
   }
 
-  async getRaw(soul: string) {
+  getRaw(soul: string) {
     if (!soul) return null
-    const txn = this.env.beginTxn()
+    const txn = this.env.beginTxn({ readOnly: true })
     try {
       const data = txn.getString(this.dbi, soul)
       txn.commit()
@@ -51,7 +53,7 @@ export class GunLmdbClient {
     return JSON.parse(data)
   }
 
-  async writeNode(soul: string, nodeData: GunNode) {
+  writeNode(soul: string, nodeData: GunNode) {
     if (!soul) return
     const txn = this.env.beginTxn()
     const nodeDataMeta = (nodeData && nodeData['_']) || {}
@@ -77,9 +79,9 @@ export class GunLmdbClient {
     }
   }
 
-  async write(put: GunPut) {
+  write(put: GunPut) {
     if (!put) return
-    for (let soul in put) await this.writeNode(soul, put[soul])
+    for (let soul in put) this.writeNode(soul, put[soul])
   }
 
   close() {
