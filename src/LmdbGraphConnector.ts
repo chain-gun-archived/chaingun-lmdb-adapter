@@ -36,17 +36,19 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
 
   put({
     graph,
+    diffCb,
     msgId = '',
     cb
   }: {
     graph: GunPut
     msgId?: string
     replyTo?: string
+    diffCb?: (msg: GunMsg) => void
     cb?: GunMsgCb
   }) {
     const id = generateMessageId()
     try {
-      this._client.write(graph)
+      const diff = this._client.write(graph)
       if (cb) {
         cb({
           '#': id,
@@ -55,7 +57,14 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
           err: null
         })
       }
+      if (diff && diffCb) {
+        diffCb({
+          '#': msgId,
+          put: diff
+        })
+      }
     } catch (err) {
+      console.warn(err.stack)
       if (cb) {
         cb({
           '#': id,

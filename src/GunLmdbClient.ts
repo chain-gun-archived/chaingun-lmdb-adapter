@@ -1,4 +1,5 @@
 import lmdb from 'node-lmdb'
+import { diffGunCRDT, mergeGraph } from '@notabug/chaingun'
 
 export const DEFAULT_CONFIG: LmdbOptions = {
   path: 'lmdb'
@@ -56,23 +57,19 @@ export class GunLmdbClient {
   writeNode(soul: string, nodeData: GunNode) {
     if (!soul) return
     const txn = this.env.beginTxn()
-    const nodeDataMeta = (nodeData && nodeData['_']) || {}
-    const nodeDataState = nodeDataMeta['>'] || {}
 
     try {
       const existingData = txn.getStringUnsafe(this.dbi, soul)
-      const node = this.deserialize(existingData) || {}
-      const meta = (node['_'] = node['_'] || { '#': soul, '>': {} })
-      const state = (meta['>'] = meta['>'] || {})
-
-      for (let key in nodeData) {
-        if (key === '_' || !(key in nodeDataState)) continue
-        node[key] = nodeData[key]
-        state[key] = nodeDataState[key]
-      }
-
-      txn.putString(this.dbi, soul, this.serialize(node))
+      const node = this.deserialize(existingData) || undefined
+      const existingGraph = { [soul]: node }
+      const graphUpdates = { [soul]: nodeData }
+      const graphDiff = diffGunCRDT(graphUpdates, existingGraph)
+      if (!graphDiff || !graphDiff[soul]) return
+      const updatedGraph = mergeGraph(existingGraph, graphDiff)
+      const updated = updatedGraph[soul]
+      txn.putString(this.dbi, soul, this.serialize(updated!))
       txn.commit()
+      return graphDiff[soul]
     } catch (e) {
       txn.abort()
       throw e
@@ -81,7 +78,18 @@ export class GunLmdbClient {
 
   write(put: GunPut) {
     if (!put) return
-    for (let soul in put) this.writeNode(soul, put[soul])
+    const diff: GunGraphData = {}
+    let hasDiff = false
+
+    for (let soul in put) {
+      const nodeDiff = this.writeNode(soul, put[soul])
+      if (nodeDiff) {
+        diff[soul] = nodeDiff
+        hasDiff = true
+      }
+    }
+
+    if (hasDiff) return diff
   }
 
   close() {
