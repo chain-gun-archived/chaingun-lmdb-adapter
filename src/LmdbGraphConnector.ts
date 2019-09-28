@@ -22,7 +22,6 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
     msgId?: string
     cb?: GunMsgCb
   }) {
-    const now = new Date().getTime()
     const node = this._client.get(soul)
     const put: GunGraphData | null = node
       ? {
@@ -32,9 +31,6 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
     const msg: GunMsg = { '#': generateMessageId(), put }
     if (msgId) msg['@'] = msgId
     if (cb) cb(msg)
-
-    const done = new Date().getTime()
-    console.log('get', soul, done - now)
     return NOOP
   }
 
@@ -48,7 +44,6 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
     replyTo?: string
     cb?: GunMsgCb
   }) {
-    const start = new Date().getTime()
     const id = generateMessageId()
     try {
       this._client.write(graph)
@@ -72,9 +67,6 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
         console.warn(err.stack || err)
       }
     }
-    const done = new Date().getTime()
-    console.log('write', done - start, Object.keys(graph))
-
     return NOOP
   }
 }
