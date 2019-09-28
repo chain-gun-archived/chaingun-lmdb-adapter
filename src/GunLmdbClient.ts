@@ -22,28 +22,16 @@ export class GunLmdbClient {
 
   get(soul: string) {
     if (!soul) return null
-    const txn = this.env.beginTxn({ readOnly: true })
-    try {
-      const data = this.deserialize(txn.getStringUnsafe(this.dbi, soul))
-      txn.commit()
-      return data
-    } catch (e) {
-      txn.abort()
-      throw e
-    }
+    return this.transaction(txn => this.deserialize(txn.getStringUnsafe(this.dbi, soul)), {
+      readOnly: true
+    })
   }
 
   getRaw(soul: string) {
     if (!soul) return null
-    const txn = this.env.beginTxn({ readOnly: true })
-    try {
-      const data = txn.getString(this.dbi, soul)
-      txn.commit()
-      return data || ''
-    } catch (e) {
-      txn.abort()
-      throw e
-    }
+    return this.transaction(txn => txn.getString(this.dbi, soul) || '', {
+      readOnly: true
+    })
   }
 
   serialize(node: GunNode) {
@@ -56,9 +44,7 @@ export class GunLmdbClient {
 
   writeNode(soul: string, nodeData: GunNode) {
     if (!soul) return
-    const txn = this.env.beginTxn()
-
-    try {
+    return this.transaction(txn => {
       const existingData = txn.getStringUnsafe(this.dbi, soul)
       const node = this.deserialize(existingData) || undefined
       const existingGraph = { [soul]: node }
@@ -68,9 +54,19 @@ export class GunLmdbClient {
       const updatedGraph = mergeGraph(existingGraph, graphDiff)
       const updated = updatedGraph[soul]
       txn.putString(this.dbi, soul, this.serialize(updated!))
-      txn.commit()
       return graphDiff[soul]
+    })
+  }
+
+  transaction(fn: (txn: any) => any, opts?: any) {
+    const txn = this.env.beginTxn(opts)
+    let result: any
+    try {
+      result = fn(txn)
+      txn.commit()
+      return result
     } catch (e) {
+      console.error('transaction error', e.stack)
       txn.abort()
       throw e
     }
