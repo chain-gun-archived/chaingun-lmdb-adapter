@@ -9,6 +9,7 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
   constructor(lmdbOpts = DEFAULT_CONFIG) {
     super('LmdbGraphConnector')
     this._client = new GunLmdbClient(lmdbOpts)
+    this.events.connection.trigger(true)
   }
 
   get({
@@ -31,6 +32,7 @@ export class LmdbGraphConnector extends GunGraphWireConnector {
     const msg: GunMsg = { '#': generateMessageId(), put }
     if (msgId) msg['@'] = msgId
     if (cb) cb(msg)
+    if (put) this.events.graphData.trigger(put)
     return NOOP
   }
 

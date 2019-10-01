@@ -16,6 +16,7 @@
       "dom"
     ],
     "strict": true,
+    "skipLibCheck": true,
     "sourceMap": true,
     "declaration": true,
     "allowSyntheticDefaultImports": true,
