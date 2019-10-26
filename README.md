@@ -1,3 +1,3 @@
-# chaingun-lmdb
+# gun-graph-adapter-lmdb
 
-LMDB Graph Connector for ChainGun
+Standard Gun Graph Adapter interface for LMDB
