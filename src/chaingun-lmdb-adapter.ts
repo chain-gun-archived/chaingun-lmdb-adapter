@@ -3,6 +3,10 @@ import { GunGraphAdapter, GunGraphData, GunNode } from '@chaingun/types'
 import lmdb from 'node-lmdb'
 
 const DEFAULT_DB_NAME = 'gun-nodes'
+const DEFAULT_CRDT_OPTS = {
+  diffFn: diffGunCRDT,
+  mergeFn: mergeGraph
+}
 
 type LmdbOptions = any
 type LmdbEnv = any
@@ -121,6 +125,32 @@ export async function getJsonString(
   return getJsonStringSync(env, dbi, soul)
 }
 
+export function putNode(
+  dbi: LmdbDbi,
+  txn: LmdbTransaction,
+  soul: string,
+  node: GunNode | undefined,
+  updated: GunNode,
+  opts = DEFAULT_CRDT_OPTS
+): GunNode | null {
+  const { diffFn = diffGunCRDT, mergeFn = mergeGraph } = opts
+  const existingGraph = { [soul]: node }
+  const graphUpdates = { [soul]: updated }
+  const graphDiff = diffFn(graphUpdates, existingGraph)
+  const nodeDiff = graphDiff && graphDiff[soul]
+  if (!nodeDiff || !graphDiff) {
+    return null
+  }
+
+  const updatedGraph = mergeFn(existingGraph, graphDiff)
+  const result = updatedGraph[soul]
+
+  // tslint:disable-next-line: no-expression-statement
+  txn.putString(dbi, soul, serialize(result!))
+
+  return nodeDiff
+}
+
 /**
  * Write Gun Graph data to the LMDB database synchronously
  *
@@ -133,12 +163,8 @@ export function putSync(
   env: LmdbEnv,
   dbi: LmdbDbi,
   graphData: GunGraphData,
-  opts = {
-    diffFn: diffGunCRDT,
-    mergeFn: mergeGraph
-  }
+  opts = DEFAULT_CRDT_OPTS
 ): GunGraphData | null {
-  const { diffFn = diffGunCRDT, mergeFn = mergeGraph } = opts
   if (!graphData) {
     return null
   }
@@ -149,25 +175,13 @@ export function putSync(
 
   return transaction(env, txn => {
     for (const soul in graphData) {
-      if (!soul) {
+      if (!soul || !graphData[soul]) {
         continue
       }
 
       const existingData = txn.getStringUnsafe(dbi, soul)
       const node = deserialize(existingData) || undefined
-      const existingGraph = { [soul]: node }
-      const graphUpdates = { [soul]: graphData[soul] }
-      const graphDiff = diffFn(graphUpdates, existingGraph)
-      const nodeDiff = graphDiff && graphDiff[soul]
-      if (!nodeDiff || !graphDiff) {
-        continue
-      }
-
-      const updatedGraph = mergeFn(existingGraph, graphDiff)
-      const updated = updatedGraph[soul]
-
-      // tslint:disable-next-line: no-expression-statement
-      txn.putString(dbi, soul, serialize(updated!))
+      const nodeDiff = putNode(dbi, txn, soul, node, graphData[soul]!, opts)
 
       if (nodeDiff) {
         // @ts-ignore
