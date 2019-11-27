@@ -7,20 +7,20 @@ declare module 'node-lmdb' {
     getCurrentBinaryUnsafe(): any
     getCurrentBoolean(): any
     getCurrentNumber(): any
-    getCurrentString(): any
-    getCurrentStringUnsafe(): any
-    goToDup(): any
-    goToDupRange(): any
-    goToFirst(): any
-    goToFirstDup(): any
-    goToKey(key: string): any
-    goToLast(): any
-    goToLastDup(): any
-    goToNext(): any
-    goToNextDup(): any
-    goToPrev(): any
-    goToPrevDup(): any
-    goToRange(): any
+    getCurrentString(): string | undefined
+    getCurrentStringUnsafe(): string | undefined
+    goToDup(): string | undefined
+    goToDupRange(): string | undefined
+    goToFirst(): string | undefined
+    goToFirstDup(): string | undefined
+    goToKey(key: string): string | undefined
+    goToLast(): string | undefined
+    goToLastDup(): string | undefined
+    goToNext(): string | undefined
+    goToNextDup(): string | undefined
+    goToPrev(): string | undefined
+    goToPrevDup(): string | undefined
+    goToRange(key: string): string | undefined
   }
   export class Env {
     beginTxn(): any

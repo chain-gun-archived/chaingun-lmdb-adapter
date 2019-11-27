@@ -1,8 +1,16 @@
 import { diffGunCRDT, mergeGraph } from '@chaingun/crdt'
-import { GunGraphAdapter, GunGraphData, GunNode } from '@chaingun/types'
+import {
+  GunGraphAdapter,
+  GunGraphData,
+  GunNode,
+  GunValue
+} from '@chaingun/types'
 import lmdb from 'node-lmdb'
 
 const DEFAULT_DB_NAME = 'gun-nodes'
+const WIDE_NODE_MARKER = 'WIDE_NODE'
+const WIDE_NODE_THRESHOLD =
+  parseInt(process.env.GUN_LMDB_WIDE_NODE_THRESHOLD || '', 10) || 1100
 const DEFAULT_CRDT_OPTS = {
   diffFn: diffGunCRDT,
   mergeFn: mergeGraph
@@ -12,6 +20,10 @@ type LmdbOptions = any
 type LmdbEnv = any
 type LmdbDbi = any
 type LmdbTransaction = any
+
+export function wideNodeKey(soul: string, key = ''): string {
+  return `wide:${soul}/${key}`
+}
 
 /**
  * Open a LMDB database as a Gun Graph Adapter
@@ -53,6 +65,42 @@ export function adapterFromEnvAndDbi(
   }
 }
 
+export function readWideNode(
+  env: LmdbEnv,
+  dbi: LmdbDbi,
+  soul: string
+): GunNode {
+  return transaction<GunNode>(env, txn => {
+    const stateVectors: Record<string, number> = {}
+    const node: any = {
+      _: {
+        '#': soul,
+        '>': stateVectors
+      }
+    }
+    const cursor = new lmdb.Cursor(txn, dbi)
+    const base = wideNodeKey(soul)
+    // tslint:disable-next-line: no-let
+    let dbKey = cursor.goToRange(base)
+
+    while (dbKey && dbKey.indexOf(base) === 0) {
+      const key = dbKey.replace(base, '')
+      const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+
+      if (stateVector) {
+        // tslint:disable-next-line: no-object-mutation
+        stateVectors[key] = stateVector
+        // tslint:disable-next-line: no-object-mutation
+        node[key] = value
+      }
+
+      dbKey = cursor.goToNext()
+    }
+
+    return node
+  })
+}
+
 /**
  * Load Gun Node data from a LMDB database synchronously
  *
@@ -69,9 +117,21 @@ export function getSync(
     return null
   }
 
-  return transaction(env, txn => deserialize(txn.getStringUnsafe(dbi, soul)), {
-    readOnly: true
-  })
+  return transaction(
+    env,
+    txn => {
+      const raw = txn.getStringUnsafe(dbi, soul)
+
+      if (raw === WIDE_NODE_MARKER) {
+        return readWideNode(env, dbi, soul)
+      }
+
+      return deserialize(raw)
+    },
+    {
+      readOnly: true
+    }
+  )
 }
 
 /**
@@ -105,9 +165,21 @@ export function getJsonStringSync(
     return ''
   }
 
-  return transaction(env, txn => txn.getString(dbi, soul) || '', {
-    readOnly: true
-  })
+  return transaction(
+    env,
+    txn => {
+      const raw = txn.getString(dbi, soul) || ''
+
+      if (raw === WIDE_NODE_MARKER) {
+        return JSON.stringify(readWideNode(env, dbi, soul))
+      }
+
+      return raw
+    },
+    {
+      readOnly: true
+    }
+  )
 }
 
 /**
@@ -145,8 +217,99 @@ export function putNode(
   const updatedGraph = mergeFn(existingGraph, graphDiff)
   const result = updatedGraph[soul]
 
-  // tslint:disable-next-line: no-expression-statement
-  txn.putString(dbi, soul, serialize(result!))
+  if (result && Object.keys(result).length >= WIDE_NODE_THRESHOLD) {
+    console.log('converting to wide node', soul)
+    txn.putString(dbi, soul, WIDE_NODE_MARKER)
+    putWideNode(dbi, txn, soul, result, opts)
+  } else {
+    // tslint:disable-next-line: no-expression-statement
+    txn.putString(dbi, soul, serialize(result!))
+  }
+
+  return nodeDiff
+}
+
+export function readWideNodeKey(
+  dbi: LmdbDbi,
+  txn: LmdbTransaction,
+  soul: string,
+  key: string
+): {
+  readonly stateVector?: number
+  readonly value?: GunValue
+} {
+  const dbKey = wideNodeKey(soul, key)
+  const raw = txn.getStringUnsafe(dbi, dbKey)
+
+  if (!raw) {
+    return {
+      stateVector: undefined,
+      value: undefined
+    }
+  }
+
+  const { stateVector, value } = JSON.parse(raw) || {}
+
+  return {
+    stateVector,
+    value
+  }
+}
+
+export function putWideNode(
+  dbi: LmdbDbi,
+  txn: LmdbTransaction,
+  soul: string,
+  updated: GunNode,
+  opts = DEFAULT_CRDT_OPTS
+): GunNode | null {
+  const { diffFn = diffGunCRDT } = opts
+  const stateVectors: Record<string, number> = {}
+  const existingNode: any = {
+    _: {
+      '#': soul,
+      '>': stateVectors
+    }
+  }
+
+  for (const key in updated) {
+    if (!key) {
+      continue
+    }
+
+    const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+
+    if (stateVector) {
+      // tslint:disable-next-line: no-object-mutation
+      stateVectors[key] = stateVector
+      // tslint:disable-next-line: no-object-mutation
+      existingNode[key] = value
+    }
+  }
+
+  const existingGraph = { [soul]: existingNode }
+  const graphUpdates = { [soul]: updated }
+  const graphDiff = diffFn(graphUpdates, existingGraph)
+  const nodeDiff = graphDiff && graphDiff[soul]
+
+  if (!nodeDiff) {
+    return null
+  }
+
+  for (const key in nodeDiff) {
+    if (!key) {
+      continue
+    }
+
+    txn.putString(
+      dbi,
+      wideNodeKey(soul, key),
+      JSON.stringify({
+        stateVector: nodeDiff._['>'][key],
+        value: nodeDiff[key]
+      })
+    )
+  }
 
   return nodeDiff
 }
@@ -180,8 +343,16 @@ export function putSync(
       }
 
       const existingData = txn.getStringUnsafe(dbi, soul)
-      const node = deserialize(existingData) || undefined
-      const nodeDiff = putNode(dbi, txn, soul, node, graphData[soul]!, opts)
+
+      // tslint:disable-next-line: no-let
+      let nodeDiff = null
+
+      if (existingData === WIDE_NODE_MARKER) {
+        nodeDiff = putWideNode(dbi, txn, soul, graphData[soul]!, opts)
+      } else {
+        const node = deserialize(existingData) || undefined
+        nodeDiff = putNode(dbi, txn, soul, node, graphData[soul]!, opts)
+      }
 
       if (nodeDiff) {
         // @ts-ignore
@@ -252,6 +423,8 @@ export function transaction<T = any>(
     txn.commit()
     return result
   } catch (e) {
+    // tslint:disable-next-line: no-console
+    console.error('lmdb transaction error', e.stack || e)
     txn.abort()
     throw e
   }
