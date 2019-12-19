@@ -57,10 +57,12 @@ export function adapterFromEnvAndDbi(
       env.close()
       dbi.close()
     },
-    get: (soul: string) => get(env, dbi, soul),
-    getJsonString: (soul: string) => getJsonString(env, dbi, soul),
-    getJsonStringSync: (soul: string) => getJsonStringSync(env, dbi, soul),
-    getSync: (soul: string) => getSync(env, dbi, soul),
+    get: (soul: string, opts?: GunGetOpts) => get(env, dbi, soul, opts),
+    getJsonString: (soul: string, opts?: GunGetOpts) =>
+      getJsonString(env, dbi, soul, opts),
+    getJsonStringSync: (soul: string, opts?: GunGetOpts) =>
+      getJsonStringSync(env, dbi, soul, opts),
+    getSync: (soul: string, opts?: GunGetOpts) => getSync(env, dbi, soul, opts),
     put: (graphData: GunGraphData) => put(env, dbi, graphData),
     putSync: (graphData: GunGraphData) => putSync(env, dbi, graphData)
   }
