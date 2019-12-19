@@ -12,6 +12,9 @@ const DEFAULT_DB_NAME = 'gun-nodes'
 const WIDE_NODE_MARKER = 'WIDE_NODE'
 const WIDE_NODE_THRESHOLD =
   parseInt(process.env.GUN_LMDB_WIDE_NODE_THRESHOLD || '', 10) || 1100
+const GET_MAX_KEYS =
+  parseInt(process.env.GUN_LMDB_GET_MAX_KEYS || '', 10) || 10000
+
 const DEFAULT_CRDT_OPTS = {
   diffFn: diffGunCRDT,
   mergeFn: mergeGraph
@@ -86,7 +89,10 @@ export function readWideNode(
     // tslint:disable-next-line: no-let
     let dbKey = cursor.goToRange(base)
 
-    while (dbKey && dbKey.indexOf(base) === 0) {
+    // tslint:disable-next-line: no-let
+    let keyCount = 0
+
+    while (dbKey && dbKey.indexOf(base) === 0 && keyCount < GET_MAX_KEYS) {
       const key = dbKey.replace(base, '')
       const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
 
@@ -98,6 +104,7 @@ export function readWideNode(
       }
 
       dbKey = cursor.goToNext()
+      keyCount++
     }
 
     return node
