@@ -1,5 +1,6 @@
 import { diffGunCRDT, mergeGraph } from '@chaingun/crdt'
 import {
+  GunGetOpts,
   GunGraphAdapter,
   GunGraphData,
   GunNode,
@@ -101,6 +102,33 @@ export function readWideNode(
   })
 }
 
+export function readWideNodeKeyAsNode(
+  env: LmdbEnv,
+  dbi: LmdbDbi,
+  soul: string,
+  key: string
+): GunNode {
+  return transaction<GunNode>(env, txn => {
+    const stateVectors: Record<string, number> = {}
+    const node: any = {
+      _: {
+        '#': soul,
+        '>': stateVectors
+      }
+    }
+    const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+
+    if (stateVector) {
+      // tslint:disable-next-line: no-object-mutation
+      stateVectors[key] = stateVector
+      // tslint:disable-next-line: no-object-mutation
+      node[key] = value
+    }
+
+    return node
+  })
+}
+
 /**
  * Load Gun Node data from a LMDB database synchronously
  *
@@ -111,7 +139,8 @@ export function readWideNode(
 export function getSync(
   env: LmdbEnv,
   dbi: LmdbDbi,
-  soul: string
+  soul: string,
+  opts?: GunGetOpts
 ): GunNode | null {
   if (!soul) {
     return null
@@ -122,11 +151,31 @@ export function getSync(
     txn => {
       const raw = txn.getStringUnsafe(dbi, soul)
 
+      const singleKey = opts && opts['.']
+
       if (raw === WIDE_NODE_MARKER) {
+        if (singleKey) {
+          return readWideNodeKeyAsNode(env, dbi, soul, singleKey)
+        }
+
         return readWideNode(env, dbi, soul)
       }
 
-      return deserialize(raw)
+      const node = deserialize(raw)
+
+      if (node && singleKey) {
+        return {
+          _: {
+            '#': soul,
+            '>': {
+              [singleKey]: node._['>'][singleKey]
+            }
+          },
+          [singleKey]: node[singleKey]
+        }
+      }
+
+      return node
     },
     {
       readOnly: true
@@ -144,9 +193,10 @@ export function getSync(
 export async function get(
   env: LmdbEnv,
   dbi: LmdbDbi,
-  soul: string
+  soul: string,
+  opts?: GunGetOpts
 ): Promise<GunNode | null> {
-  return getSync(env, dbi, soul)
+  return getSync(env, dbi, soul, opts)
 }
 
 /**
@@ -159,10 +209,15 @@ export async function get(
 export function getJsonStringSync(
   env: LmdbEnv,
   dbi: LmdbDbi,
-  soul: string
+  soul: string,
+  opts?: GunGetOpts
 ): string {
   if (!soul) {
     return ''
+  }
+
+  if (opts && opts['.']) {
+    return JSON.stringify(getSync(env, dbi, soul, opts))
   }
 
   return transaction(
@@ -192,9 +247,10 @@ export function getJsonStringSync(
 export async function getJsonString(
   env: LmdbEnv,
   dbi: LmdbDbi,
-  soul: string
+  soul: string,
+  opts?: GunGetOpts
 ): Promise<string> {
-  return getJsonStringSync(env, dbi, soul)
+  return getJsonStringSync(env, dbi, soul, opts)
 }
 
 export function putNode(
@@ -218,6 +274,7 @@ export function putNode(
   const result = updatedGraph[soul]
 
   if (result && Object.keys(result).length >= WIDE_NODE_THRESHOLD) {
+    // tslint:disable-next-line: no-console
     console.log('converting to wide node', soul)
     txn.putString(dbi, soul, WIDE_NODE_MARKER)
     putWideNode(dbi, txn, soul, result, opts)
