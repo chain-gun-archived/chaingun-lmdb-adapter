@@ -85,26 +85,32 @@ export function readWideNode(
       }
     }
     const cursor = new lmdb.Cursor(txn, dbi)
-    const base = wideNodeKey(soul)
-    // tslint:disable-next-line: no-let
-    let dbKey = cursor.goToRange(base)
+    try {
+      const base = wideNodeKey(soul)
+      // tslint:disable-next-line: no-let
+      let dbKey = cursor.goToRange(base)
 
-    // tslint:disable-next-line: no-let
-    let keyCount = 0
+      // tslint:disable-next-line: no-let
+      let keyCount = 0
 
-    while (dbKey && dbKey.indexOf(base) === 0 && keyCount < GET_MAX_KEYS) {
-      const key = dbKey.replace(base, '')
-      const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+      while (dbKey && dbKey.indexOf(base) === 0 && keyCount < GET_MAX_KEYS) {
+        const key = dbKey.replace(base, '')
+        const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
 
-      if (stateVector) {
-        // tslint:disable-next-line: no-object-mutation
-        stateVectors[key] = stateVector
-        // tslint:disable-next-line: no-object-mutation
-        node[key] = value
+        if (stateVector) {
+          // tslint:disable-next-line: no-object-mutation
+          stateVectors[key] = stateVector
+          // tslint:disable-next-line: no-object-mutation
+          node[key] = value
+        }
+
+        dbKey = cursor.goToNext()
+        keyCount++
       }
-
-      dbKey = cursor.goToNext()
-      keyCount++
+    } catch (e) {
+      throw e
+    } finally {
+      cursor.close()
     }
 
     return node
