@@ -74,7 +74,8 @@ export function adapterFromEnvAndDbi(
 export function readWideNode(
   env: LmdbEnv,
   dbi: LmdbDbi,
-  soul: string
+  soul: string,
+  opts?: GunGetOpts
 ): GunNode {
   return transaction<GunNode>(env, txn => {
     const stateVectors: Record<string, number> = {}
@@ -85,16 +86,33 @@ export function readWideNode(
       }
     }
     const cursor = new lmdb.Cursor(txn, dbi)
+    const singleKey = opts && opts['.']
+    const lexStart = (opts && opts['>']) || singleKey
+    const lexEnd = (opts && opts['<']) || singleKey
+
     try {
       const base = wideNodeKey(soul)
+      const startKey = lexStart
+        ? wideNodeKey(soul, lexStart)
+        : wideNodeKey(soul)
       // tslint:disable-next-line: no-let
-      let dbKey = cursor.goToRange(base)
+      let dbKey = cursor.goToRange(startKey)
 
       // tslint:disable-next-line: no-let
       let keyCount = 0
 
-      while (dbKey && dbKey.indexOf(base) === 0 && keyCount < GET_MAX_KEYS) {
+      if (dbKey === startKey && lexStart && !singleKey) {
+        // Exclusive lex?
+        dbKey = cursor.goToNext()
+      }
+
+      while (dbKey && dbKey.indexOf(base) === 0) {
         const key = dbKey.replace(base, '')
+
+        if (lexEnd && key > lexEnd) {
+          break
+        }
+
         const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
 
         if (stateVector) {
@@ -106,38 +124,15 @@ export function readWideNode(
 
         dbKey = cursor.goToNext()
         keyCount++
+
+        if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
+          break
+        }
       }
     } catch (e) {
       throw e
     } finally {
       cursor.close()
-    }
-
-    return node
-  })
-}
-
-export function readWideNodeKeyAsNode(
-  env: LmdbEnv,
-  dbi: LmdbDbi,
-  soul: string,
-  key: string
-): GunNode {
-  return transaction<GunNode>(env, txn => {
-    const stateVectors: Record<string, number> = {}
-    const node: any = {
-      _: {
-        '#': soul,
-        '>': stateVectors
-      }
-    }
-    const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
-
-    if (stateVector) {
-      // tslint:disable-next-line: no-object-mutation
-      stateVectors[key] = stateVector
-      // tslint:disable-next-line: no-object-mutation
-      node[key] = value
     }
 
     return node
@@ -166,28 +161,40 @@ export function getSync(
     txn => {
       const raw = txn.getStringUnsafe(dbi, soul)
 
-      const singleKey = opts && opts['.']
-
       if (raw === WIDE_NODE_MARKER) {
-        if (singleKey) {
-          return readWideNodeKeyAsNode(env, dbi, soul, singleKey)
-        }
-
-        return readWideNode(env, dbi, soul)
+        return readWideNode(env, dbi, soul, opts)
       }
 
       const node = deserialize(raw)
 
-      if (node && singleKey) {
-        return {
+      if (node && opts) {
+        const singleKey = opts && opts['.']
+        const lexStart = (opts && opts['>']) || singleKey
+        const lexEnd = (opts && opts['<']) || singleKey
+
+        if (!(lexStart || lexEnd)) {
+          return node
+        }
+
+        const resultState: Record<string, number> = {}
+        const result: any = {
           _: {
             '#': soul,
-            '>': {
-              [singleKey]: node._['>'][singleKey]
-            }
-          },
-          [singleKey]: node[singleKey]
+            '>': resultState
+          }
         }
+
+        const state = node._['>']
+        Object.keys(state).forEach(key => {
+          if (lexStart && key >= lexStart && lexEnd && key <= lexEnd) {
+            // tslint:disable-next-line: no-object-mutation
+            result[key] = node[key]
+            // tslint:disable-next-line: no-object-mutation
+            resultState[key] = state[key]
+          }
+        })
+
+        return result
       }
 
       return node
@@ -231,7 +238,7 @@ export function getJsonStringSync(
     return ''
   }
 
-  if (opts && opts['.']) {
+  if (opts) {
     return JSON.stringify(getSync(env, dbi, soul, opts))
   }
 
