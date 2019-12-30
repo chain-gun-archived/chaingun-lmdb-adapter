@@ -89,6 +89,8 @@ export function readWideNode(
     const singleKey = opts && opts['.']
     const lexStart = (opts && opts['>']) || singleKey
     const lexEnd = (opts && opts['<']) || singleKey
+    // tslint:disable-next-line: no-let
+    let keyCount = 0
 
     try {
       const base = wideNodeKey(soul)
@@ -97,9 +99,6 @@ export function readWideNode(
         : wideNodeKey(soul)
       // tslint:disable-next-line: no-let
       let dbKey = cursor.goToRange(startKey)
-
-      // tslint:disable-next-line: no-let
-      let keyCount = 0
 
       if (dbKey === startKey && lexStart && !singleKey) {
         // Exclusive lex?
@@ -135,7 +134,7 @@ export function readWideNode(
       cursor.close()
     }
 
-    return node
+    return keyCount ? node : null
   })
 }
 
@@ -185,16 +184,19 @@ export function getSync(
         }
 
         const state = node._['>']
+        // tslint:disable-next-line: no-let
+        let keyCount = 0
         Object.keys(state).forEach(key => {
-          if (lexStart && key >= lexStart && lexEnd && key <= lexEnd) {
+          if (lexStart && key >= lexStart && lexEnd && key <= lexEnd && key in state) {
             // tslint:disable-next-line: no-object-mutation
             result[key] = node[key]
             // tslint:disable-next-line: no-object-mutation
             resultState[key] = state[key]
+            keyCount++
           }
         })
 
-        return result
+        return keyCount ? result : null
       }
 
       return node
