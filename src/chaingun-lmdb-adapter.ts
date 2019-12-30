@@ -119,10 +119,10 @@ export function readWideNode(
           stateVectors[key] = stateVector
           // tslint:disable-next-line: no-object-mutation
           node[key] = value
+          keyCount++
         }
 
         dbKey = cursor.goToNext()
-        keyCount++
 
         if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
           break
@@ -187,7 +187,13 @@ export function getSync(
         // tslint:disable-next-line: no-let
         let keyCount = 0
         Object.keys(state).forEach(key => {
-          if (lexStart && key >= lexStart && lexEnd && key <= lexEnd && key in state) {
+          if (
+            lexStart &&
+            key >= lexStart &&
+            lexEnd &&
+            key <= lexEnd &&
+            key in state
+          ) {
             // tslint:disable-next-line: no-object-mutation
             result[key] = node[key]
             // tslint:disable-next-line: no-object-mutation
