@@ -137,10 +137,6 @@ export function readWideNode(
         cursor.close()
       }
 
-      if (soul === 'changelog') {
-        console.log('node', node)
-      }
-
       return keyCount ? node : null
     },
     {
