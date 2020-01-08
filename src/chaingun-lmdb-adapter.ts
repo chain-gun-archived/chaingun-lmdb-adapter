@@ -66,6 +66,7 @@ export function adapterFromEnvAndDbi(
     getJsonStringSync: (soul: string, opts?: GunGetOpts) =>
       getJsonStringSync(env, dbi, soul, opts),
     getSync: (soul: string, opts?: GunGetOpts) => getSync(env, dbi, soul, opts),
+    pruneChangelog: async (before: number) => pruneChangelog(env, dbi, before),
     put: (graphData: GunGraphData) => put(env, dbi, graphData),
     putSync: (graphData: GunGraphData) => putSync(env, dbi, graphData)
   }
@@ -77,65 +78,75 @@ export function readWideNode(
   soul: string,
   opts?: GunGetOpts
 ): GunNode {
-  return transaction<GunNode>(env, txn => {
-    const stateVectors: Record<string, number> = {}
-    const node: any = {
-      _: {
-        '#': soul,
-        '>': stateVectors
+  return transaction<GunNode>(
+    env,
+    txn => {
+      const stateVectors: Record<string, number> = {}
+      const node: any = {
+        _: {
+          '#': soul,
+          '>': stateVectors
+        }
       }
-    }
-    const cursor = new lmdb.Cursor(txn, dbi)
-    const singleKey = opts && opts['.']
-    const lexStart = (opts && opts['>']) || singleKey
-    const lexEnd = (opts && opts['<']) || singleKey
-    // tslint:disable-next-line: no-let
-    let keyCount = 0
-
-    try {
-      const base = wideNodeKey(soul)
-      const startKey = lexStart
-        ? wideNodeKey(soul, lexStart)
-        : wideNodeKey(soul)
+      const cursor = new lmdb.Cursor(txn, dbi)
+      const singleKey = opts && opts['.']
+      const lexStart = (opts && opts['>']) || singleKey
+      const lexEnd = (opts && opts['<']) || singleKey
       // tslint:disable-next-line: no-let
-      let dbKey = cursor.goToRange(startKey)
+      let keyCount = 0
 
-      if (dbKey === startKey && lexStart && !singleKey) {
-        // Exclusive lex?
-        dbKey = cursor.goToNext()
+      try {
+        const base = wideNodeKey(soul)
+        const startKey = lexStart
+          ? wideNodeKey(soul, lexStart)
+          : wideNodeKey(soul)
+        // tslint:disable-next-line: no-let
+        let dbKey = cursor.goToRange(startKey)
+
+        if (dbKey === startKey && lexStart && !singleKey) {
+          // Exclusive lex?
+          dbKey = cursor.goToNext()
+        }
+
+        while (dbKey && dbKey.indexOf(base) === 0) {
+          const key = dbKey.replace(base, '')
+
+          if (lexEnd && key > lexEnd) {
+            break
+          }
+
+          const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+
+          if (stateVector) {
+            // tslint:disable-next-line: no-object-mutation
+            stateVectors[key] = stateVector
+            // tslint:disable-next-line: no-object-mutation
+            node[key] = value
+            keyCount++
+          }
+
+          dbKey = cursor.goToNext()
+
+          if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
+            break
+          }
+        }
+      } catch (e) {
+        throw e
+      } finally {
+        cursor.close()
       }
 
-      while (dbKey && dbKey.indexOf(base) === 0) {
-        const key = dbKey.replace(base, '')
-
-        if (lexEnd && key > lexEnd) {
-          break
-        }
-
-        const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
-
-        if (stateVector) {
-          // tslint:disable-next-line: no-object-mutation
-          stateVectors[key] = stateVector
-          // tslint:disable-next-line: no-object-mutation
-          node[key] = value
-          keyCount++
-        }
-
-        dbKey = cursor.goToNext()
-
-        if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
-          break
-        }
+      if (soul === 'changelog') {
+        console.log('node', node)
       }
-    } catch (e) {
-      throw e
-    } finally {
-      cursor.close()
+
+      return keyCount ? node : null
+    },
+    {
+      readOnly: true
     }
-
-    return keyCount ? node : null
-  })
+  )
 }
 
 /**
@@ -399,6 +410,38 @@ export function putWideNode(
   }
 
   return nodeDiff
+}
+
+export function pruneChangelog(
+  env: LmdbEnv,
+  dbi: LmdbDbi,
+  before: number
+): void {
+  return transaction<void>(env, txn => {
+    const cursor = new lmdb.Cursor(txn, dbi)
+    const lexEnd = new Date(before).toISOString()
+    const soul = 'changelog'
+
+    try {
+      const base = wideNodeKey(soul)
+      const endKey = wideNodeKey(soul, lexEnd)
+      // tslint:disable-next-line: no-let
+      let dbKey = cursor.goToRange(endKey)
+      dbKey = cursor.goToPrev()
+
+      while (dbKey && dbKey.indexOf(base) === 0) {
+        const key = dbKey.replace(base, '')
+        if (key) {
+          txn.del(dbi, dbKey)
+        }
+        dbKey = cursor.goToPrev()
+      }
+    } catch (e) {
+      throw e
+    } finally {
+      cursor.close()
+    }
+  })
 }
 
 /**
