@@ -289,14 +289,14 @@ export async function getJsonString(
   )
 }
 
-export function putNode(
+export async function putNode(
   dbi: LmdbDbi,
   txn: LmdbTransaction,
   soul: string,
   node: GunNode | undefined,
   updated: GunNode,
   opts = DEFAULT_CRDT_OPTS
-): GunNode | null {
+): Promise<GunNode | null> {
   const { diffFn = diffGunCRDT, mergeFn = mergeGraph } = opts
   const existingGraph = { [soul]: node }
   const graphUpdates = { [soul]: updated }
@@ -313,7 +313,7 @@ export function putNode(
     // tslint:disable-next-line: no-console
     console.log('converting to wide node', soul)
     txn.putString(dbi, soul, WIDE_NODE_MARKER)
-    putWideNode(dbi, txn, soul, result, opts)
+    await putWideNode(dbi, txn, soul, result, opts)
   } else {
     // tslint:disable-next-line: no-expression-statement
     txn.putString(dbi, soul, serialize(result!))
