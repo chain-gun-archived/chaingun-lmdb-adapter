@@ -7,6 +7,7 @@ import {
   GunNode,
   GunValue
 } from '@chaingun/types'
+import { gzip, ungzip } from 'node-gzip'
 import lmdb from 'node-lmdb'
 
 const DEFAULT_DB_NAME = 'gun-nodes'
@@ -15,6 +16,8 @@ const WIDE_NODE_THRESHOLD =
   parseInt(process.env.GUN_LMDB_WIDE_NODE_THRESHOLD || '', 10) || 1100
 const GET_MAX_KEYS =
   parseInt(process.env.GUN_LMDB_GET_MAX_KEYS || '', 10) || 10000
+
+const USE_GZIP = !process.env.GUN_LMDB_DISABLE_GZIP
 
 const DEFAULT_CRDT_OPTS = {
   diffFn: diffGunCRDT,
@@ -67,7 +70,14 @@ export function adapterFromEnvAndDbi(
     'process_dupes'
   )
 
-  writeQueue.middleware.use(async item => {
+  const readQueue = new GunProcessQueue<WriteTransaction>(
+    'LMDB Read Queue',
+    'process_dupes'
+  )
+
+  async function processTransaction(
+    item: WriteTransaction
+  ): Promise<WriteTransaction> {
     const [tx, ok, fail] = item
     try {
       ok(await tx())
@@ -75,7 +85,10 @@ export function adapterFromEnvAndDbi(
       fail(e)
     }
     return item
-  })
+  }
+
+  writeQueue.middleware.use(processTransaction)
+  readQueue.middleware.use(processTransaction)
 
   return {
     close: () => {
@@ -83,93 +96,76 @@ export function adapterFromEnvAndDbi(
       dbi.close()
     },
     get: (soul: string, opts?: GunGetOpts) =>
-      get(writeQueue, env, dbi, soul, opts),
+      get(readQueue, env, dbi, soul, opts),
     getJsonString: (soul: string, opts?: GunGetOpts) =>
-      getJsonString(writeQueue, env, dbi, soul, opts),
+      getJsonString(readQueue, env, dbi, soul, opts),
     pruneChangelog: async (before: number) =>
-      pruneChangelog(writeQueue, env, dbi, before),
+      pruneChangelog(readQueue, env, dbi, before),
     put: (graphData: GunGraphData) => put(writeQueue, env, dbi, graphData)
   }
 }
 
-export function readWideNode(
-  queue: GunProcessQueue<WriteTransaction>,
-  env: LmdbEnv,
+export async function readWideNode(
   dbi: LmdbDbi,
+  txn: LmdbTransaction,
   soul: string,
   opts?: GunGetOpts
 ): Promise<GunNode> {
-  return transaction<GunNode>(
-    queue,
-    env,
-    async txn => {
-      const stateVectors: Record<string, number> = {}
-      const node: any = {
-        _: {
-          '#': soul,
-          '>': stateVectors
-        }
-      }
-      const cursor = new lmdb.Cursor(txn, dbi)
-      const singleKey = opts && opts['.']
-      const lexStart = (opts && opts['>']) || singleKey
-      const lexEnd = (opts && opts['<']) || singleKey
-      // tslint:disable-next-line: no-let
-      let keyCount = 0
-
-      try {
-        const base = wideNodeKey(soul)
-        const startKey = lexStart
-          ? wideNodeKey(soul, lexStart)
-          : wideNodeKey(soul)
-        // tslint:disable-next-line: no-let
-        let dbKey = cursor.goToRange(startKey)
-
-        if (dbKey === startKey && lexStart && !singleKey) {
-          // Exclusive lex?
-          dbKey = cursor.goToNext()
-        }
-
-        while (dbKey && dbKey.indexOf(base) === 0) {
-          const key = dbKey.replace(base, '')
-
-          if (lexEnd && key > lexEnd) {
-            break
-          }
-
-          const { stateVector, value } = await readWideNodeKey(
-            dbi,
-            txn,
-            soul,
-            key
-          )
-
-          if (stateVector) {
-            // tslint:disable-next-line: no-object-mutation
-            stateVectors[key] = stateVector
-            // tslint:disable-next-line: no-object-mutation
-            node[key] = value
-            keyCount++
-          }
-
-          dbKey = cursor.goToNext()
-
-          if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
-            break
-          }
-        }
-      } catch (e) {
-        throw e
-      } finally {
-        cursor.close()
-      }
-
-      return keyCount ? node : null
-    },
-    {
-      readOnly: true
+  const stateVectors: Record<string, number> = {}
+  const node: any = {
+    _: {
+      '#': soul,
+      '>': stateVectors
     }
-  )
+  }
+  const cursor = new lmdb.Cursor(txn, dbi)
+  const singleKey = opts && opts['.']
+  const lexStart = (opts && opts['>']) || singleKey
+  const lexEnd = (opts && opts['<']) || singleKey
+  // tslint:disable-next-line: no-let
+  let keyCount = 0
+
+  try {
+    const base = wideNodeKey(soul)
+    const startKey = lexStart ? wideNodeKey(soul, lexStart) : wideNodeKey(soul)
+    // tslint:disable-next-line: no-let
+    let dbKey = cursor.goToRange(startKey)
+
+    if (dbKey === startKey && lexStart && !singleKey) {
+      // Exclusive lex?
+      dbKey = cursor.goToNext()
+    }
+
+    while (dbKey && dbKey.indexOf(base) === 0) {
+      const key = dbKey.replace(base, '')
+
+      if (lexEnd && key > lexEnd) {
+        break
+      }
+
+      const { stateVector, value } = await readWideNodeKey(dbi, txn, soul, key)
+
+      if (stateVector) {
+        // tslint:disable-next-line: no-object-mutation
+        stateVectors[key] = stateVector
+        // tslint:disable-next-line: no-object-mutation
+        node[key] = value
+        keyCount++
+      }
+
+      dbKey = cursor.goToNext()
+
+      if (keyCount > GET_MAX_KEYS || (lexEnd && key === lexEnd)) {
+        break
+      }
+    }
+  } catch (e) {
+    throw e
+  } finally {
+    cursor.close()
+  }
+
+  return keyCount ? node : null
 }
 
 /**
@@ -193,11 +189,11 @@ export async function get(
   return transaction<GunNode | null>(
     queue,
     env,
-    txn => {
-      const raw = txn.getStringUnsafe(dbi, soul)
+    async txn => {
+      const raw = await decompress(txn.getBinaryUnsafe(dbi, soul))
 
       if (raw === WIDE_NODE_MARKER) {
-        return readWideNode(queue, env, dbi, soul, opts)
+        return readWideNode(dbi, txn, soul, opts)
       }
 
       const node = deserialize(raw)
@@ -274,11 +270,11 @@ export async function getJsonString(
   return transaction<string>(
     queue,
     env,
-    txn => {
-      const raw = txn.getString(dbi, soul) || ''
+    async txn => {
+      const raw = await decompress(txn.getBinaryUnsafe(dbi, soul))
 
       if (raw === WIDE_NODE_MARKER) {
-        return JSON.stringify(readWideNode(queue, env, dbi, soul))
+        return JSON.stringify(readWideNode(dbi, txn, soul))
       }
 
       return raw
@@ -312,11 +308,14 @@ export async function putNode(
   if (result && Object.keys(result).length >= WIDE_NODE_THRESHOLD) {
     // tslint:disable-next-line: no-console
     console.log('converting to wide node', soul)
-    txn.putString(dbi, soul, WIDE_NODE_MARKER)
+    const buffer = await compress(WIDE_NODE_MARKER)
+    txn.putBinary(dbi, soul, buffer)
     await putWideNode(dbi, txn, soul, result, opts)
   } else {
     // tslint:disable-next-line: no-expression-statement
-    txn.putString(dbi, soul, serialize(result!))
+    const raw = await compress(serialize(result!))
+
+    txn.putBinary(dbi, soul, raw)
   }
 
   return nodeDiff
@@ -332,7 +331,7 @@ export async function readWideNodeKey(
   readonly value?: GunValue
 }> {
   const dbKey = wideNodeKey(soul, key)
-  const raw = txn.getStringUnsafe(dbi, dbKey)
+  const raw = await decompress(txn.getBinaryUnsafe(dbi, dbKey))
 
   if (!raw) {
     return {
@@ -394,14 +393,13 @@ export async function putWideNode(
       continue
     }
 
-    txn.putString(
-      dbi,
-      wideNodeKey(soul, key),
-      JSON.stringify({
-        stateVector: nodeDiff._['>'][key],
-        value: nodeDiff[key]
-      })
-    )
+    const rawData = JSON.stringify({
+      stateVector: nodeDiff._['>'][key],
+      value: nodeDiff[key]
+    })
+
+    const buffer = await compress(rawData)
+    txn.putBinary(dbi, wideNodeKey(soul, key), buffer)
   }
 
   return nodeDiff
@@ -469,15 +467,15 @@ export async function put(
         continue
       }
 
-      const existingData = txn.getStringUnsafe(dbi, soul)
+      const raw = await decompress(txn.getBinaryUnsafe(dbi, soul))
 
       // tslint:disable-next-line: no-let
       let nodeDiff = null
 
-      if (existingData === WIDE_NODE_MARKER) {
+      if (raw === WIDE_NODE_MARKER) {
         nodeDiff = await putWideNode(dbi, txn, soul, graphData[soul]!, opts)
       } else {
-        const node = deserialize(existingData) || undefined
+        const node = deserialize(raw) || undefined
         nodeDiff = await putNode(dbi, txn, soul, node, graphData[soul]!, opts)
       }
 
@@ -545,10 +543,6 @@ export async function transaction<T = any>(
     }
   }
 
-  if (opts && opts.readOnly) {
-    return execute()
-  }
-
   const promise = new Promise<T>((ok, fail) => {
     queue.enqueue([execute, ok, fail])
     queue.process()
@@ -572,5 +566,24 @@ export function serialize(node: GunNode): string {
  * @param data the string data to parse as a GunNode
  */
 export function deserialize(data: string): GunNode {
-  return JSON.parse(data)
+  return data ? JSON.parse(data) : null
+}
+
+export async function compress(str: string): Promise<Buffer> {
+  if (USE_GZIP) {
+    return gzip(str)
+  }
+
+  return new Buffer(str)
+}
+
+export async function decompress(buffer?: Buffer | null): Promise<string> {
+  if (!buffer) {
+    return ''
+  }
+
+  if (USE_GZIP) {
+    return (await ungzip(buffer)).toString()
+  }
+  return buffer.toString()
 }
