@@ -1,3 +1,4 @@
+import { GunProcessQueue } from '@chaingun/control-flow'
 import { diffGunCRDT, mergeGraph } from '@chaingun/crdt'
 import {
   GunGetOpts,
@@ -44,6 +45,12 @@ export function createGraphAdapter(
   return adapterFromEnvAndDbi(env, dbi)
 }
 
+type WriteTransaction = readonly [
+  () => Promise<any>,
+  (res: any) => void,
+  (err: Error) => void
+]
+
 /**
  * Create Gun Graph Adapter from open LMDB database
  *
@@ -55,32 +62,47 @@ export function adapterFromEnvAndDbi(
   env: lmdb.Env,
   dbi: LmdbDbi
 ): GunGraphAdapter {
+  const writeQueue = new GunProcessQueue<WriteTransaction>(
+    'LMDB Write Queue',
+    'process_dupes'
+  )
+
+  writeQueue.middleware.use(async item => {
+    const [tx, ok, fail] = item
+    try {
+      ok(await tx())
+    } catch (e) {
+      fail(e)
+    }
+    return item
+  })
+
   return {
     close: () => {
       env.close()
       dbi.close()
     },
-    get: (soul: string, opts?: GunGetOpts) => get(env, dbi, soul, opts),
+    get: (soul: string, opts?: GunGetOpts) =>
+      get(writeQueue, env, dbi, soul, opts),
     getJsonString: (soul: string, opts?: GunGetOpts) =>
-      getJsonString(env, dbi, soul, opts),
-    getJsonStringSync: (soul: string, opts?: GunGetOpts) =>
-      getJsonStringSync(env, dbi, soul, opts),
-    getSync: (soul: string, opts?: GunGetOpts) => getSync(env, dbi, soul, opts),
-    pruneChangelog: async (before: number) => pruneChangelog(env, dbi, before),
-    put: (graphData: GunGraphData) => put(env, dbi, graphData),
-    putSync: (graphData: GunGraphData) => putSync(env, dbi, graphData)
+      getJsonString(writeQueue, env, dbi, soul, opts),
+    pruneChangelog: async (before: number) =>
+      pruneChangelog(writeQueue, env, dbi, before),
+    put: (graphData: GunGraphData) => put(writeQueue, env, dbi, graphData)
   }
 }
 
 export function readWideNode(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
   dbi: LmdbDbi,
   soul: string,
   opts?: GunGetOpts
-): GunNode {
+): Promise<GunNode> {
   return transaction<GunNode>(
+    queue,
     env,
-    txn => {
+    async txn => {
       const stateVectors: Record<string, number> = {}
       const node: any = {
         _: {
@@ -115,7 +137,12 @@ export function readWideNode(
             break
           }
 
-          const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+          const { stateVector, value } = await readWideNodeKey(
+            dbi,
+            txn,
+            soul,
+            key
+          )
 
           if (stateVector) {
             // tslint:disable-next-line: no-object-mutation
@@ -152,23 +179,25 @@ export function readWideNode(
  * @param dbi lmdb DBI object
  * @param soul the unique identifier of the node to fetch
  */
-export function getSync(
+export async function get(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
   dbi: LmdbDbi,
   soul: string,
   opts?: GunGetOpts
-): GunNode | null {
+): Promise<GunNode | null> {
   if (!soul) {
     return null
   }
 
-  return transaction(
+  return transaction<GunNode | null>(
+    queue,
     env,
     txn => {
       const raw = txn.getStringUnsafe(dbi, soul)
 
       if (raw === WIDE_NODE_MARKER) {
-        return readWideNode(env, dbi, soul, opts)
+        return readWideNode(queue, env, dbi, soul, opts)
       }
 
       const node = deserialize(raw)
@@ -221,49 +250,35 @@ export function getSync(
 }
 
 /**
- * Load Gun Node data from a LMDB database asynchronously
- *
- * @param env lmdb.Env object
- * @param dbi lmdb DBI object
- * @param soul the unique identifier of the node to fetch
- */
-export async function get(
-  env: LmdbEnv,
-  dbi: LmdbDbi,
-  soul: string,
-  opts?: GunGetOpts
-): Promise<GunNode | null> {
-  return getSync(env, dbi, soul, opts)
-}
-
-/**
  * Load Gun Node data as a string from a LMDB database synchronously
  *
  * @param env lmdb.Env object
  * @param dbi lmdb DBI object
  * @param soul the unique identifier of the node to fetch
  */
-export function getJsonStringSync(
+export async function getJsonString(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
   dbi: LmdbDbi,
   soul: string,
   opts?: GunGetOpts
-): string {
+): Promise<string> {
   if (!soul) {
     return ''
   }
 
   if (opts) {
-    return JSON.stringify(getSync(env, dbi, soul, opts))
+    return JSON.stringify(await get(queue, env, dbi, soul, opts))
   }
 
-  return transaction(
+  return transaction<string>(
+    queue,
     env,
     txn => {
       const raw = txn.getString(dbi, soul) || ''
 
       if (raw === WIDE_NODE_MARKER) {
-        return JSON.stringify(readWideNode(env, dbi, soul))
+        return JSON.stringify(readWideNode(queue, env, dbi, soul))
       }
 
       return raw
@@ -272,22 +287,6 @@ export function getJsonStringSync(
       readOnly: true
     }
   )
-}
-
-/**
- * Load Gun Node data as a string from a LMDB database asynchronously
- *
- * @param env lmdb.Env object
- * @param dbi lmdb DBI object
- * @param soul the unique identifier of the node to fetch
- */
-export async function getJsonString(
-  env: LmdbEnv,
-  dbi: LmdbDbi,
-  soul: string,
-  opts?: GunGetOpts
-): Promise<string> {
-  return getJsonStringSync(env, dbi, soul, opts)
 }
 
 export function putNode(
@@ -323,15 +322,15 @@ export function putNode(
   return nodeDiff
 }
 
-export function readWideNodeKey(
+export async function readWideNodeKey(
   dbi: LmdbDbi,
   txn: LmdbTransaction,
   soul: string,
   key: string
-): {
+): Promise<{
   readonly stateVector?: number
   readonly value?: GunValue
-} {
+}> {
   const dbKey = wideNodeKey(soul, key)
   const raw = txn.getStringUnsafe(dbi, dbKey)
 
@@ -350,13 +349,13 @@ export function readWideNodeKey(
   }
 }
 
-export function putWideNode(
+export async function putWideNode(
   dbi: LmdbDbi,
   txn: LmdbTransaction,
   soul: string,
   updated: GunNode,
   opts = DEFAULT_CRDT_OPTS
-): GunNode | null {
+): Promise<GunNode | null> {
   const { diffFn = diffGunCRDT } = opts
   const stateVectors: Record<string, number> = {}
   const existingNode: any = {
@@ -371,7 +370,7 @@ export function putWideNode(
       continue
     }
 
-    const { stateVector, value } = readWideNodeKey(dbi, txn, soul, key)
+    const { stateVector, value } = await readWideNodeKey(dbi, txn, soul, key)
 
     if (stateVector) {
       // tslint:disable-next-line: no-object-mutation
@@ -409,11 +408,12 @@ export function putWideNode(
 }
 
 export function pruneChangelog(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
   dbi: LmdbDbi,
   before: number
-): void {
-  return transaction<void>(env, txn => {
+): Promise<void> {
+  return transaction<void>(queue, env, txn => {
     const cursor = new lmdb.Cursor(txn, dbi)
     const lexEnd = new Date(before).toISOString()
     const soul = 'changelog'
@@ -448,12 +448,13 @@ export function pruneChangelog(
  * @param graphData the Gun Graph data to write
  * @param opts
  */
-export function putSync(
+export async function put(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
   dbi: LmdbDbi,
   graphData: GunGraphData,
   opts = DEFAULT_CRDT_OPTS
-): GunGraphData | null {
+): Promise<GunGraphData | null> {
   if (!graphData) {
     return null
   }
@@ -462,7 +463,7 @@ export function putSync(
   // tslint:disable-next-line: no-let
   let hasDiff = false
 
-  return transaction(env, txn => {
+  return transaction(queue, env, async txn => {
     for (const soul in graphData) {
       if (!soul || !graphData[soul]) {
         continue
@@ -474,10 +475,10 @@ export function putSync(
       let nodeDiff = null
 
       if (existingData === WIDE_NODE_MARKER) {
-        nodeDiff = putWideNode(dbi, txn, soul, graphData[soul]!, opts)
+        nodeDiff = await putWideNode(dbi, txn, soul, graphData[soul]!, opts)
       } else {
         const node = deserialize(existingData) || undefined
-        nodeDiff = putNode(dbi, txn, soul, node, graphData[soul]!, opts)
+        nodeDiff = await putNode(dbi, txn, soul, node, graphData[soul]!, opts)
       }
 
       if (nodeDiff) {
@@ -491,21 +492,6 @@ export function putSync(
 
     return hasDiff ? diff : null
   })
-}
-
-/**
- * Write Gun Graph data to the LMDB database asynchronously
- *
- * @param env lmdb.Env object
- * @param dbi lmdb DBI object
- * @param graphData the Gun Graph data to write
- */
-export async function put(
-  env: LmdbEnv,
-  dbi: LmdbDbi,
-  graphData: GunGraphData
-): Promise<GunGraphData | null> {
-  return putSync(env, dbi, graphData)
 }
 
 /**
@@ -532,28 +518,43 @@ export function openEnvAndDbi(
 /**
  * Execute a transaction on a LMDB database
  *
+ * @param queue: Write Transaction Queue
  * @param env lmdb.Env object
  * @param fn This function is passed the transaction and is expected to return synchronously
  * @param opts options for the LMDB transaction passed to beginTxn
  */
-export function transaction<T = any>(
+export async function transaction<T = any>(
+  queue: GunProcessQueue<WriteTransaction>,
   env: LmdbEnv,
-  fn: (txn: LmdbTransaction) => T,
+  fn: (txn: LmdbTransaction) => Promise<T> | T,
   opts?: any
-): T {
-  const txn: LmdbTransaction = env.beginTxn(opts)
-  // tslint:disable-next-line: no-let
-  let result: T
-  try {
-    result = fn(txn)
-    txn.commit()
-    return result
-  } catch (e) {
-    // tslint:disable-next-line: no-console
-    console.error('lmdb transaction error', e.stack || e)
-    txn.abort()
-    throw e
+): Promise<T> {
+  async function execute(): Promise<T> {
+    const txn: LmdbTransaction = env.beginTxn(opts)
+    // tslint:disable-next-line: no-let
+    let result: T
+    try {
+      result = await fn(txn)
+      txn.commit()
+      return result
+    } catch (e) {
+      // tslint:disable-next-line: no-console
+      console.error('lmdb transaction error', e.stack || e)
+      txn.abort()
+      throw e
+    }
   }
+
+  if (opts && opts.readOnly) {
+    return execute()
+  }
+
+  const promise = new Promise<T>((ok, fail) => {
+    queue.enqueue([execute, ok, fail])
+    queue.process()
+  })
+
+  return promise
 }
 
 /**
