@@ -100,7 +100,7 @@ export function adapterFromEnvAndDbi(
     getJsonString: (soul: string, opts?: GunGetOpts) =>
       getJsonString(readQueue, env, dbi, soul, opts),
     pruneChangelog: async (before: number) =>
-      pruneChangelog(readQueue, env, dbi, before),
+      pruneChangelog(writeQueue, env, dbi, before),
     put: (graphData: GunGraphData) => put(writeQueue, env, dbi, graphData)
   }
 }
