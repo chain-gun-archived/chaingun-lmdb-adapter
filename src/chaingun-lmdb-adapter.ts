@@ -305,7 +305,12 @@ export async function putNode(
   const updatedGraph = mergeFn(existingGraph, graphDiff)
   const result = updatedGraph[soul]
 
-  if (result && Object.keys(result).length >= WIDE_NODE_THRESHOLD) {
+  if (
+    result &&
+    (Object.keys(result).length >= WIDE_NODE_THRESHOLD ||
+      soul === 'changelog' ||
+      soul.slice(0, 6) === 'peers/')
+  ) {
     // tslint:disable-next-line: no-console
     console.log('converting to wide node', soul)
     const buffer = await compress(WIDE_NODE_MARKER)
